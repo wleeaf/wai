@@ -1,15 +1,27 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Network.Socket.BufferPool.Recv (
     receive,
     receiveNoWait,
+    receiveWith,
     makeRecvN,
 ) where
 
+import Control.Applicative ((<|>))
+import Control.Concurrent.STM
+import qualified Control.Exception as E
 import qualified Data.ByteString as BS
 import Data.ByteString.Internal (ByteString (..), unsafeCreate)
+import Data.Functor (($>))
 import Data.IORef
 import Network.Socket (Socket, recvBuf, recvBufNoWait)
+#if defined(mingw32_HOST_OS)
+import Control.Concurrent (forkIO)
+import Control.Monad (void)
+#else
+import Network.Socket (waitAndCancelReadSocketSTM)
+#endif
 
 import Network.Socket.BufferPool.Buffer
 import Network.Socket.BufferPool.Types
@@ -34,6 +46,49 @@ receiveNoWait sock pool = tryWithBufferPool pool $ \ptr size ->
     -- to the blocking path so errors surface there with their errno
     -- intact.
     fromIntegral <$> recvBufNoWait sock ptr size
+
+-- | Like 'receive', but giving up when the given STM action succeeds
+--   rather than waiting for the peer for ever.  @Left@ is what that
+--   action returned, @Right@ is what was received, with @Right \"\"@ for
+--   EOF as in 'receive'.
+--
+--   The wait on the socket is cancelled however this ends: an IO manager
+--   built on an interface like @io_uring@ holds a reference on the socket
+--   for as long as the poll it was asked for is outstanding, so a wait
+--   left behind by a caller which gave up is a socket which does not
+--   close.
+--
+--   On Windows a read cannot be waited on, so it is run on a thread of
+--   its own and what it read is handed back.  A read this caller has
+--   stopped waiting for fills a buffer that is nobody's by then.
+--
+-- /Caveats of 'BufferPool' apply./
+receiveWith :: Socket -> BufferPool -> STM a -> IO (Either a ByteString)
+receiveWith sock pool giveUp = do
+    -- Nothing to wait for if it is already there.
+    mbs <- receiveNoWait sock pool
+    case mbs of
+        Just bs -> return $ Right bs
+        Nothing -> slow
+  where
+    recv = receive sock pool
+#if !defined(mingw32_HOST_OS)
+    slow = do
+        (readable, cancelWait) <- waitAndCancelReadSocketSTM sock
+        ev <- flip E.finally cancelWait $ atomically $
+            (Left <$> giveUp) <|> (readable $> Right ())
+        either (return . Left) (const $ Right <$> recv) ev
+#else
+    slow = do
+        var <- newEmptyTMVarIO
+        void $ forkIO $ do
+            r <- E.try recv
+            atomically $ putTMVar var (r :: Either E.SomeException ByteString)
+        ev <- atomically $
+            (Left <$> giveUp)
+                <|> (Right <$> (takeTMVar var >>= either throwSTM return))
+        return ev
+#endif
 
 ----------------------------------------------------------------
 
