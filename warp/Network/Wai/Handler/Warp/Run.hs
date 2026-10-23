@@ -27,7 +27,6 @@ import Control.Concurrent.STM (
     newEmptyTMVarIO,
     putTMVar,
     takeTMVar,
-    throwSTM,
 #endif
  )
 import qualified Control.Exception as E
@@ -57,9 +56,6 @@ import Network.Socket (
     close,
 #if !WINDOWS
     fdSocket,
-#if MIN_VERSION_network(3,2,2)
-    waitAndCancelReadSocketSTM,
-#endif
 #endif
     getSocketName,
     setSocketOption,
@@ -88,7 +84,7 @@ import Network.Wai.Handler.Warp.HTTP2.Types (isHTTP2)
 import Network.Wai.Handler.Warp.Imports hiding (readInt)
 import Network.Wai.Handler.Warp.SendFile (sendFile)
 import Network.Wai.Handler.Warp.Settings
-import Network.Wai.Handler.Warp.ShuttingDown (readShuttingDown, writeShuttingDown)
+import Network.Wai.Handler.Warp.ShuttingDown (writeShuttingDown)
 import Network.Wai.Handler.Warp.Types
 import Network.Wai.Handler.Warp.Watchdog
 
@@ -219,78 +215,25 @@ makeGracefulRecv sock pool ss appsInProgress =
 -- @since 3.5.0
 makeWatchedRecv
     :: Socket -> BufferPool -> ServerState -> TVar Int -> ConnWatchdog -> Recv
-makeWatchedRecv sock pool ss appsInProgress wd = do
-    timedOut <- isTimedOut wd
-    when timedOut $ E.throwIO T.TimeoutThread
+makeWatchedRecv sock pool ss appsInProgress wd =
     makeGracefulRecvWith sock pool ss appsInProgress (timedOutSTM wd)
+
+data GiveUp = ShuttingDown | TimedOut
 
 makeGracefulRecvWith
     :: Socket -> BufferPool -> ServerState -> TVar Int -> STM () -> Recv
 makeGracefulRecvWith sock pool ss appsInProgress timedOut = do
-    tryFastPath <- not <$> readShuttingDown (serverShuttingDown ss)
-    if tryFastPath then do
-        mbs <- receiveNoWait sock pool
-        case mbs of
-          Just bs -> return bs
-          Nothing -> slowPath
-      else slowPath
-  where
-    slowPath = makeGracefulRecvSlow sock pool ss appsInProgress timedOut
-
-data RecvEvent = ShuttingDown | TimedOut | Readable | Received ByteString
-
-makeGracefulRecvSlow
-    :: Socket -> BufferPool -> ServerState -> TVar Int -> STM () -> Recv
-makeGracefulRecvSlow sock pool ss appsInProgress timedOut = do
-    -- Cancelled however this ends, and not only when it ends because the
-    -- socket became readable: an IO manager built on an interface like
-    -- io_uring holds a reference on the socket for as long as the poll it
-    -- was asked for is outstanding, so a wait left behind by a connection
-    -- that is shutting down or has timed out is a socket that does not
-    -- close.
-    (waitRecv, cancelWait) <- waitForSomethingToRead
-    ev <- flip E.finally cancelWait $ atomically $
+    r <- receiveWith sock pool $
         -- when shutting down
         (checkShutdown $> ShuttingDown)
         <|>
         -- when the watchdog gave up on this connection
         (timedOut $> TimedOut)
-        <|>
-        -- else wait for the socket, or for the read done on our behalf
-        waitRecv
-    case ev of
-        ShuttingDown -> pure ""
-        TimedOut -> E.throwIO T.TimeoutThread
-        Readable -> recv
-        Received bs -> pure bs
+    case r of
+        Left ShuttingDown -> pure ""
+        Left TimedOut -> E.throwIO T.TimeoutThread
+        Right bs -> pure bs
   where
-    recv = receive sock pool
-
-#if !WINDOWS && MIN_VERSION_network(3,2,2)
-    -- The socket can be waited on, so the read is left where it is and this
-    -- thread waits for it alongside everything else.
-    waitForSomethingToRead = do
-        (readable, cancelWait) <- waitAndCancelReadSocketSTM sock
-        return (readable $> Readable, cancelWait)
-#else
-    -- 'waitReadSocketSTM' does not work on WINDOWS, and a read that cannot
-    -- be waited on is a read that blocks in a foreign call -- where neither
-    -- the watchdog's 'TVar' nor an asynchronous exception can reach this
-    -- thread, so a connection that has to be given up on cannot be.  The
-    -- read is done on a thread of its own instead and hands back what it
-    -- read, which is what 'windowsThreadBlockHack' already does for accept.
-    --
-    -- A read this thread has stopped waiting for is a read whose connection
-    -- is over, so the buffer it fills is nobody's by then.
-    -- Nothing to cancel: the read is already running on its own thread, and
-    -- the only way to stop it is the one this comment rules out.
-    waitForSomethingToRead = do
-        var <- newEmptyTMVarIO
-        void $ forkIO $ do
-            r <- E.try recv
-            atomically $ putTMVar var (r :: Either E.SomeException ByteString)
-        return (takeTMVar var >>= either throwSTM (return . Received), return ())
-#endif
     checkShutdown = do
        check =<< currentShuttingDownStateSTM ss
        check . (<= 0) =<< readTVar appsInProgress
