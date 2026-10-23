@@ -50,7 +50,8 @@ receiveNoWait sock pool = tryWithBufferPool pool $ \ptr size ->
 -- | Like 'receive', but giving up when the given STM action succeeds
 --   rather than waiting for the peer for ever.  @Left@ is what that
 --   action returned, @Right@ is what was received, with @Right \"\"@ for
---   EOF as in 'receive'.
+--   EOF as in 'receive'.  The action is looked at before anything is
+--   read, so nothing is read once it succeeds.
 --
 --   The wait on the socket is cancelled however this ends: an IO manager
 --   built on an interface like @io_uring@ holds a reference on the socket
@@ -65,11 +66,16 @@ receiveNoWait sock pool = tryWithBufferPool pool $ \ptr size ->
 -- /Caveats of 'BufferPool' apply./
 receiveWith :: Socket -> BufferPool -> STM a -> IO (Either a ByteString)
 receiveWith sock pool giveUp = do
-    -- Nothing to wait for if it is already there.
-    mbs <- receiveNoWait sock pool
-    case mbs of
-        Just bs -> return $ Right bs
-        Nothing -> slow
+    -- Given up already: nothing is read, even if it is there.
+    early <- atomically $ (Just <$> giveUp) <|> return Nothing
+    case early of
+        Just a -> return $ Left a
+        Nothing -> do
+            -- Nothing to wait for if it is already there.
+            mbs <- receiveNoWait sock pool
+            case mbs of
+                Just bs -> return $ Right bs
+                Nothing -> slow
   where
     recv = receive sock pool
 #if !defined(mingw32_HOST_OS)
