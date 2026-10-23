@@ -13,13 +13,13 @@ import Control.Concurrent.STM
 import qualified Control.Exception as E
 import qualified Data.ByteString as BS
 import Data.ByteString.Internal (ByteString (..), unsafeCreate)
-import Data.Functor (($>))
 import Data.IORef
 import Network.Socket (Socket, recvBuf, recvBufNoWait)
 #if defined(mingw32_HOST_OS)
 import Control.Concurrent (forkIO)
 import Control.Monad (void)
 #else
+import Data.Functor (($>))
 import Network.Socket (waitAndCancelReadSocketSTM)
 #endif
 
