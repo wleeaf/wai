@@ -59,6 +59,9 @@ import Network.Socket (
 #endif
     getSocketName,
     setSocketOption,
+#if !WINDOWS && MIN_VERSION_network(3,2,2)
+    waitAndCancelReadSocketSTM,
+#endif
     withSocketsDo,
  )
 #if MIN_VERSION_network(3,1,1)
@@ -339,7 +342,7 @@ handleClosedListener = E.handle $ \e ->
         else E.throwIO e
 #else
 makeListener set socket = do
-    -- Two ways to get here.  As in 'makeGracefulRecvSlow',
+    -- Two ways to get here.  As in 'receiveWith',
     -- 'waitReadSocketSTM' doesn't work on WINDOWS and blocks indefinitely;
     -- and before network 3.2.2 there is no 'waitAndCancelReadSocketSTM' to
     -- call at all.  Either way a shutdown ends the accept loop the old way,
