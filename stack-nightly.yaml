@@ -12,7 +12,8 @@ packages:
   - ./wai-http2-extra
   - ./wai-websockets
   - ./warp
-  - ./warp-quic
+  # warp-quic is left out here: it needs http3, which needs a quic that
+  # wants crypton 2.1, and this snapshot is on crypton 1.1.
   - ./warp-tls
 flags:
   wai-extra:
@@ -27,8 +28,6 @@ extra-deps:
   # is released. Revert to a Hackage version before merging.
   - git: https://github.com/kazu-yamamoto/http2
     commit: 40d14d4b49dd1e0252d2226b40a31f9b073ddd38
-  - http3-0.1.9
-  - quic-0.3.18
 allow-newer: true
 allow-newer-deps:
   - http2
