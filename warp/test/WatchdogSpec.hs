@@ -22,28 +22,33 @@ import System.TimeManager (TimeoutThread (..))
 import System.Timeout (timeout)
 import Test.Hspec
 
-import RunSpec (withApp)
+import RunSpec (withAppWithin)
 
 -- All tests run with a timeout of one second.
 settings :: Settings
 settings = setTimeout 1 defaultSettings
 
+-- | These tests wait that timeout out and then wait for what follows, so
+--   they need more room than the three seconds 'RunSpec.withApp' gives.
+withApp10 :: Settings -> Application -> (Int -> IO a) -> IO a
+withApp10 = withAppWithin $ 10 * 1000 * 1000
+
 spec :: Spec
 spec = describe "watchdog" $ do
     describe "HTTP/1.1" $ do
         it "closes an idle connection" $
-            withApp settings okApp $ \port -> withSock port $ \s -> do
+            withApp10 settings okApp $ \port -> withSock port $ \s -> do
                 mbs <- timeout 2500000 $ recvAll s
                 mbs `shouldBe` Just ""
 
         it "does not limit a slow application" $
-            withApp settings (slowApp 1500000) $ \port -> withSock port $ \s -> do
+            withApp10 settings (slowApp 1500000) $ \port -> withSock port $ \s -> do
                 sendAll s "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
                 bs <- recvUntil s "slow"
                 bs `shouldSatisfy` S.isPrefixOf "HTTP/1.1 200"
 
         it "does not limit a streaming application between chunks" $
-            withApp settings (streamApp 1500000) $ \port -> withSock port $ \s -> do
+            withApp10 settings (streamApp 1500000) $ \port -> withSock port $ \s -> do
                 sendAll s "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
                 bs <- recvUntil s "second"
                 bs `shouldSatisfy` S.isInfixOf "first"
@@ -55,7 +60,7 @@ spec = describe "watchdog" $ do
                     putMVar result $ either (Just . show) (const Nothing) r
                     either E.throwIO (const $ respond $ responseLBS status200 [] "") $
                         (r :: Either E.SomeException ByteString)
-            withApp settings app $ \port -> withSock port $ \s -> do
+            withApp10 settings app $ \port -> withSock port $ \s -> do
                 sendAll s "POST / HTTP/1.1\r\nHost: localhost\r\ncontent-length: 100\r\n\r\n"
                 sendAll s "0123456789"
                 r <- takeMVar result
@@ -68,7 +73,7 @@ spec = describe "watchdog" $ do
             let settings' = setOnClose (\_ -> void $ tryPutMVar closed ()) settings
                 big = L.replicate (64 * 1024 * 1024) 88
                 app _ respond = respond $ responseLBS status200 [] big
-            withApp settings' app $ \port -> withSock port $ \s -> do
+            withApp10 settings' app $ \port -> withSock port $ \s -> do
                 sendAll s "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
                 mc <- timeout 2500000 $ takeMVar closed
                 mc `shouldBe` Just ()
@@ -77,20 +82,20 @@ spec = describe "watchdog" $ do
         it "closes an idle connection" $
             -- Supervised by the http2 library, which warp hands the
             -- connection and its timeout to.
-            withApp settings okApp $ \port -> withSock port $ \s -> do
+            withApp10 settings okApp $ \port -> withSock port $ \s -> do
                 sendAll s "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
                 sendAll s emptySettingsFrame
                 mbs <- timeout 2500000 $ recvAll s
                 fmap S.null mbs `shouldBe` Just False
 
         it "does not limit a slow application" $
-            withApp settings (slowApp 1500000) $ \port -> do
+            withApp10 settings (slowApp 1500000) $ \port -> do
                 (st, body) <- h2get port
                 st `shouldBe` status200
                 body `shouldBe` "slow"
 
         it "does not limit a streaming application between chunks" $
-            withApp settings (streamApp 1500000) $ \port -> do
+            withApp10 settings (streamApp 1500000) $ \port -> do
                 (st, body) <- h2get port
                 st `shouldBe` status200
                 body `shouldBe` "first second"
