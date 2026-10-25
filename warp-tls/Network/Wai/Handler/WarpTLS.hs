@@ -389,15 +389,7 @@ mkConn
 -- timeout of its own.
 mkConn tlsset set cc s params = recvFirstBS >>= switch
   where
-    -- A read the watchdog has given up on cannot be interrupted on
-    -- Windows, where it blocks in a foreign call, so it comes back having
-    -- found the socket closed under it. Warp's own reads take that for the
-    -- end of the connection, and so does this one.
-    recvFirstBS = endOnInvalidArgument (safeRecv s 4096) `onException` close s
-    endOnInvalidArgument = handle $ \e ->
-        if ioeGetErrorType e == InvalidArgument
-            then return S.empty
-            else throwIO (e :: IOException)
+    recvFirstBS = safeRecv s 4096 `onException` close s
     switch firstBS
         | S.null firstBS = close s >> throwIO ClientClosedConnectionPrematurely
         | S.head firstBS == 0x16 = httpOverTls tlsset set cc s firstBS params
