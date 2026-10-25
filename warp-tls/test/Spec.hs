@@ -4,7 +4,7 @@ module Main (main) where
 
 import Control.Concurrent (newChan, readChan, writeChan, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.Async (link, mapConcurrently, withAsync)
-import Control.Exception (SomeException, bracket, fromException, throwIO)
+import Control.Exception (IOException, SomeException, bracket, catch, fromException, throwIO)
 import Control.Monad (forM_, replicateM, when)
 import Data.Word (Word8)
 import qualified Network.Socket as S
@@ -119,5 +119,11 @@ observePeer report = Warp.setOnConnectionException (report . Just)
 
 drain :: S.Socket -> IO ()
 drain client = do
-    bytes <- B.recv client 4096
+    -- A peer which closes while this is reading can leave the read failing
+    -- rather than returning "", and on Windows it does. Either way the
+    -- connection is over, which is what this waits for.
+    bytes <- B.recv client 4096 `catch` closed
     if bytes == "" then pure () else drain client
+  where
+    closed :: IOException -> IO BS.ByteString
+    closed _ = pure ""
